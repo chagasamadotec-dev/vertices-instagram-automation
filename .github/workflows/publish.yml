@@ -3,7 +3,12 @@ name: Publicar no Instagram
 on:
   schedule:
     - cron: "0 15 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Publicar agora, ignorando a data"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -27,6 +32,7 @@ jobs:
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          FORCE_POST: ${{ inputs.force }}
         run: python publish_instagram.py
 
       - name: Salvar mudancas
@@ -36,4 +42,3 @@ jobs:
           git add -A
           git diff --cached --quiet || git commit -m "Post publicado automaticamente"
           git push
-
