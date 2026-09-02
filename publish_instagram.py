@@ -22,6 +22,7 @@ IG_ACCESS_TOKEN = os.environ["IG_ACCESS_TOKEN"]
 REPO = os.environ.get("GITHUB_REPOSITORY", "")
 BRANCH = os.environ.get("GITHUB_REF_NAME", "main")
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}" if REPO else None
+FORCE_POST = os.environ.get("FORCE_POST", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Sao_Paulo")
 
@@ -64,6 +65,9 @@ def find_next_post(queue_dir="queue"):
     folders = sorted(d for d in glob.glob(os.path.join(queue_dir, "*")) if os.path.isdir(d))
     if not folders:
         return None
+    if FORCE_POST:
+        print(f"FORCE_POST ativo: publicando {folders[0]} independente da data.")
+        return folders[0]
     today = datetime.now(TZ).date()
     for folder in folders:
         name = os.path.basename(folder)
