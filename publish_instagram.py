@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Publica automaticamente 1 post (carrossel) + 1 story por dia no Instagram,
-lendo as pastas em queue/AAAA-MM-DD_slug/.
+lendo as pastas em queue/AAAA-MM-DD_slug/ (em qualquer nivel de profundidade
+dentro de queue/, para aceitar pastas de lote enviadas via upload).
 
 Roda dentro do GitHub Actions (publish.yml), 1x por dia.
 Depois de publicar com sucesso, move a pasta processada para posted/.
@@ -19,7 +20,7 @@ API_BASE = "https://graph.instagram.com/v23.0"
 IG_USER_ID = os.environ["IG_USER_ID"]
 IG_ACCESS_TOKEN = os.environ["IG_ACCESS_TOKEN"]
 
-REPO = os.environ.get("GITHUB_REPOSITORY", "")
+REPO = os.environ.get("GITHUB_REPOSITORY", "")  # ex: owner/repo, definido automaticamente pelo Actions
 BRANCH = os.environ.get("GITHUB_REF_NAME", "main")
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}" if REPO else None
 FORCE_POST = os.environ.get("FORCE_POST", "false").lower() == "true"
@@ -28,7 +29,7 @@ TZ = ZoneInfo("America/Sao_Paulo")
 
 def raw_url(path):
     if not RAW_BASE:
-        raise RuntimeError("GITHUB_REPOSITORY nao definido.")
+        raise RuntimeError("GITHUB_REPOSITORY nao definido - nao e possivel montar a URL publica do arquivo.")
     return RAW_BASE + "/" + requests.utils.quote(path)
 
 
@@ -49,6 +50,7 @@ def api_get(path, **params):
         raise RuntimeError(f"Erro na chamada {path}: {data}")
     return data
 
+
 def wait_container_ready(container_id, timeout=300):
     start = time.time()
     while time.time() - start < timeout:
@@ -59,48 +61,63 @@ def wait_container_ready(container_id, timeout=300):
         if status == "ERROR":
             raise RuntimeError(f"Container {container_id} falhou: {data}")
         time.sleep(5)
-    raise RuntimeError(f"Timeout esperando container {container_id}.")
+    raise RuntimeError(f"Timeout esperando container {container_id} ficar pronto.")
 
 def find_next_post(queue_dir="queue"):
-    folders = sorted(d for d in glob.glob(os.path.join(queue_dir, "*")) if os.path.isdir(d))
-    if not folders:
-        return None
-    if FORCE_POST:
-        print(f"FORCE_POST ativo: publicando {folders[0]} independente da data.")
-        return folders[0]
-    today = datetime.now(TZ).date()
-    for folder in folders:
-        name = os.path.basename(folder)
+    """Acha a pasta AAAA-MM-DD_slug mais antiga pendente, em qualquer nivel
+    dentro de queue_dir (aceita subpastas de lote criadas pelo upload)."""
+    candidates = []
+    for root, dirs, files in os.walk(queue_dir):
+        name = os.path.basename(root)
         date_str = name.split("_", 1)[0]
         try:
             folder_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
             continue
+        candidates.append((folder_date, root))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: c[0])
+
+    if FORCE_POST:
+        folder = candidates[0][1]
+        print(f"FORCE_POST ativo: publicando {folder} independente da data.")
+        return folder
+
+    today = datetime.now(TZ).date()
+    for folder_date, folder in candidates:
         if folder_date <= today:
             return folder
-    return None
+    return None  # nada vencido ainda (a data mais proxima e no futuro)
 
 def publish_feed_post(folder):
     caption = open(os.path.join(folder, "caption.txt"), encoding="utf-8").read().strip()
+
     photos = sorted(glob.glob(os.path.join(folder, "0*.jpg")) + glob.glob(os.path.join(folder, "0*.png")))
     video_path = os.path.join(folder, "video.mp4")
     has_video = os.path.exists(video_path)
+
     children_ids = []
+
     for photo in photos:
         rel = os.path.relpath(photo)
         data = api_post(f"{IG_USER_ID}/media", image_url=raw_url(rel), is_carousel_item="true")
         children_ids.append(data["id"])
         print(f"  container criado (foto): {data['id']}")
+
     if has_video:
         rel = os.path.relpath(video_path)
         data = api_post(f"{IG_USER_ID}/media", video_url=raw_url(rel), media_type="VIDEO", is_carousel_item="true")
         vid_container = data["id"]
-        print(f"  container criado (video): {vid_container}")
+        print(f"  container criado (video): {vid_container}, aguardando processamento...")
         wait_container_ready(vid_container)
         children_ids.append(vid_container)
 
     if not children_ids:
         raise RuntimeError(f"Nenhuma midia encontrada em {folder}")
+
     if len(children_ids) == 1:
         carousel = {"id": children_ids[0]}
     else:
@@ -112,6 +129,7 @@ def publish_feed_post(folder):
         )
         print(f"  container do carrossel: {carousel['id']}")
         wait_container_ready(carousel["id"])
+
     result = api_post(f"{IG_USER_ID}/media_publish", creation_id=carousel["id"])
     print(f"  POST PUBLICADO: {result}")
     return result
@@ -129,14 +147,17 @@ def publish_story(folder):
     print(f"  STORY PUBLICADO: {result}")
     return result
 
+
 def main():
     folder = find_next_post()
     if not folder:
         print("Nenhum post pendente para hoje. Nada a fazer.")
         return
+
     print(f"Publicando: {folder}")
     publish_feed_post(folder)
     publish_story(folder)
+
     os.makedirs("posted", exist_ok=True)
     dest = os.path.join("posted", os.path.basename(folder))
     shutil.move(folder, dest)
