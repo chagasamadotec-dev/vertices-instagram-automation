@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Publica automaticamente 1 post (carrossel) + 1 story por dia no Instagram,
-lendo as pastas em queue/AAAA-MM-DD_slug/ (em qualquer nivel de profundidade
-dentro de queue/, para aceitar pastas de lote enviadas via upload).
+Publica automaticamente 1 post (carrossel) + 1 story por dia no Instagram.
+Procura pastas AAAA-MM-DD_slug em qualquer lugar do repositorio (exceto
+.git, .github e posted), para aceitar pastas de lote enviadas via upload
+em qualquer local (raiz ou dentro de queue/, aninhadas ou nao).
 
 Roda dentro do GitHub Actions (publish.yml), 1x por dia.
 Depois de publicar com sucesso, move a pasta processada para posted/.
@@ -26,6 +27,8 @@ RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}" if REPO else Non
 FORCE_POST = os.environ.get("FORCE_POST", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Sao_Paulo")
+
+EXCLUDE_DIRS = {".git", ".github", "posted", "node_modules"}
 
 def raw_url(path):
     if not RAW_BASE:
@@ -63,11 +66,12 @@ def wait_container_ready(container_id, timeout=300):
         time.sleep(5)
     raise RuntimeError(f"Timeout esperando container {container_id} ficar pronto.")
 
-def find_next_post(queue_dir="queue"):
-    """Acha a pasta AAAA-MM-DD_slug mais antiga pendente, em qualquer nivel
-    dentro de queue_dir (aceita subpastas de lote criadas pelo upload)."""
+def find_next_post(root_dir="."):
+    """Acha a pasta AAAA-MM-DD_slug mais antiga pendente, em qualquer lugar
+    do repositorio (aceita pastas de lote enviadas em qualquer local)."""
     candidates = []
-    for root, dirs, files in os.walk(queue_dir):
+    for root, dirs, files in os.walk(root_dir):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and not d.startswith(".")]
         name = os.path.basename(root)
         date_str = name.split("_", 1)[0]
         try:
