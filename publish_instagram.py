@@ -5,6 +5,13 @@ Procura pastas AAAA-MM-DD_slug em qualquer lugar do repositorio (exceto
 .git, .github e posted), para aceitar pastas de lote enviadas via upload
 em qualquer local (raiz ou dentro de queue/, aninhadas ou nao).
 
+Protecao contra duplicatas: pastas com uploads repetidos (mesmo nome
+AAAA-MM-DD_slug em mais de um lugar) sao detectadas e tratadas assim:
+- se o nome ja existe em posted/, a copia pendente e ignorada/apagada
+  (ja foi publicada antes, nao publica de novo);
+- se existem duas ou mais copias pendentes do mesmo nome, so uma e
+  mantida para publicacao e as copias extras sao apagadas.
+
 Roda dentro do GitHub Actions (publish.yml), 1x por dia.
 Depois de publicar com sucesso, move a pasta processada para posted/.
 """
@@ -35,7 +42,6 @@ def raw_url(path):
         raise RuntimeError("GITHUB_REPOSITORY nao definido - nao e possivel montar a URL publica do arquivo.")
     return RAW_BASE + "/" + requests.utils.quote(path)
 
-
 def api_post(path, **params):
     params["access_token"] = IG_ACCESS_TOKEN
     r = requests.post(f"{API_BASE}/{path}", params=params, timeout=60)
@@ -44,7 +50,6 @@ def api_post(path, **params):
         raise RuntimeError(f"Erro na chamada {path}: {data}")
     return data
 
-
 def api_get(path, **params):
     params["access_token"] = IG_ACCESS_TOKEN
     r = requests.get(f"{API_BASE}/{path}", params=params, timeout=60)
@@ -52,7 +57,6 @@ def api_get(path, **params):
     if r.status_code >= 400 or "error" in data:
         raise RuntimeError(f"Erro na chamada {path}: {data}")
     return data
-
 
 def wait_container_ready(container_id, timeout=300):
     start = time.time()
@@ -68,7 +72,13 @@ def wait_container_ready(container_id, timeout=300):
 
 def find_next_post(root_dir="."):
     """Acha a pasta AAAA-MM-DD_slug mais antiga pendente, em qualquer lugar
-    do repositorio (aceita pastas de lote enviadas em qualquer local)."""
+    do repositorio (aceita pastas de lote enviadas em qualquer local).
+
+    Tambem detecta e remove duplicatas: uploads repetidos podem deixar a
+    mesma pasta AAAA-MM-DD_slug em mais de um caminho do repositorio, o que
+    causava publicacao duplicada no Instagram (a primeira copia era
+    publicada e movida para posted/, e a segunda copia sobrava no
+    repositorio com data ja vencida, sendo publicada de novo em outro dia)."""
     candidates = []
     for root, dirs, files in os.walk(root_dir):
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and not d.startswith(".")]
@@ -76,22 +86,53 @@ def find_next_post(root_dir="."):
         date_str = name.split("_", 1)[0]
         try:
             folder_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
         except ValueError:
             continue
-        candidates.append((folder_date, root))
+        candidates.append((folder_date, name, root))
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda c: c[0])
+    # Nomes ja publicados antes (evita repostar quando sobra uma copia
+    # duplicada de algo que ja foi ao ar).
+    posted_names = set()
+    if os.path.isdir("posted"):
+        posted_names = set(os.listdir("posted"))
+
+    kept = []
+    for folder_date, name, root in candidates:
+        if name in posted_names:
+            print(f"Duplicata de post ja publicado, removendo copia sobrando: {root}")
+            shutil.rmtree(root, ignore_errors=True)
+        else:
+            kept.append((folder_date, name, root))
+
+    # Entre copias pendentes com o mesmo nome (mesmo produto/data enviado
+    # mais de uma vez), mantem so uma e apaga as demais.
+    seen = {}
+    deduped = []
+    for folder_date, name, root in kept:
+        if name in seen:
+            print(f"Duplicata pendente do mesmo post, removendo copia extra: {root}")
+            shutil.rmtree(root, ignore_errors=True)
+            continue
+        seen[name] = True
+        deduped.append((folder_date, name, root))
+
+    if not deduped:
+        return None
+
+    deduped.sort(key=lambda c: (c[0], c[1]))
 
     if FORCE_POST:
-        folder = candidates[0][1]
+        folder = deduped[0][2]
         print(f"FORCE_POST ativo: publicando {folder} independente da data.")
         return folder
 
     today = datetime.now(TZ).date()
-    for folder_date, folder in candidates:
+
+    for folder_date, name, folder in deduped:
         if folder_date <= today:
             return folder
     return None  # nada vencido ainda (a data mais proxima e no futuro)
@@ -135,6 +176,7 @@ def publish_feed_post(folder):
         wait_container_ready(carousel["id"])
 
     result = api_post(f"{IG_USER_ID}/media_publish", creation_id=carousel["id"])
+
     print(f"  POST PUBLICADO: {result}")
     return result
 
@@ -151,7 +193,6 @@ def publish_story(folder):
     print(f"  STORY PUBLICADO: {result}")
     return result
 
-
 def main():
     folder = find_next_post()
     if not folder:
@@ -164,9 +205,12 @@ def main():
 
     os.makedirs("posted", exist_ok=True)
     dest = os.path.join("posted", os.path.basename(folder))
+    if os.path.exists(dest):
+        # Protecao extra: nunca deveria acontecer (find_next_post ja filtra
+        # nomes ja publicados), mas evita aninhar pastas se acontecer mesmo assim.
+        shutil.rmtree(dest)
     shutil.move(folder, dest)
     print(f"Pasta movida para {dest}")
-
 
 if __name__ == "__main__":
     try:
